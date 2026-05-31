@@ -9,7 +9,13 @@
 
 import { supabase } from "./db.js";
 import { getDisclosures, yyyymmdd } from "./dart.js";
-import { getIpoCalendar } from "./finnhub.js";
+import {
+  getIpoCalendar,
+  getCompanyNews,
+  getDividends,
+  getDividendYield,
+  getEarningsCalendar,
+} from "./finnhub.js";
 import { collectKrIpo } from "./dart_ipo.js";
 import { summaryEnabled, summarizeTitle } from "./summarize.js";
 import { pushConfigured, notifyDisclosures, notifyIpoDday } from "./notify.js";
@@ -120,6 +126,119 @@ async function refreshUsIpoCalendar() {
   if (error) throw error;
 }
 
+// 관심종목의 미국 심볼 모으기 (뉴스/배당/실적 공용)
+async function usWatchSymbols() {
+  const { data, error } = await supabase
+    .from("watchlist")
+    .select("symbol, name")
+    .eq("market", "US");
+  if (error) throw error;
+  return [...new Map((data || []).map((w) => [w.symbol, w])).values()];
+}
+
+const ymd = (d) => yyyymmdd(d).replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3");
+
+// 해외 뉴스 수집 (최근 7일) → news 표
+async function collectUsNews(symbols) {
+  if (!symbols.length) return 0;
+  const from = ymd(new Date(Date.now() - 7 * 86400000));
+  const to = ymd(new Date());
+  const rows = [];
+  for (const w of symbols) {
+    try {
+      const list = await getCompanyNews({ symbol: w.symbol, from, to });
+      for (const n of list) {
+        if (!n.url || !n.headline) continue;
+        rows.push({
+          market: "US",
+          symbol: w.symbol,
+          ext_id: n.url,
+          headline: n.headline,
+          source: n.source || null,
+          url: n.url,
+          published_at: n.datetime ? new Date(n.datetime * 1000).toISOString() : null,
+        });
+      }
+    } catch (e) {
+      console.error(`[US] ${w.symbol} 뉴스 실패: ${e.message}`);
+    }
+    await sleep(250);
+  }
+  const inserted = await insertNew("news", rows, "ext_id");
+  return inserted.length;
+}
+
+// 해외 배당 수집 → dividends 표 (무료 한도면 0건)
+async function collectUsDividends(symbols) {
+  if (!symbols.length) return 0;
+  const from = ymd(new Date(Date.now() - 30 * 86400000));
+  const to = ymd(new Date(Date.now() + 90 * 86400000));
+  const rows = [];
+  for (const w of symbols) {
+    try {
+      const divs = await getDividends({ symbol: w.symbol, from, to });
+      if (!divs.length) { await sleep(250); continue; }
+      const yld = await getDividendYield(w.symbol);
+      for (const d of divs) {
+        if (!d.exDate) continue;
+        rows.push({
+          market: "US",
+          symbol: w.symbol,
+          name: w.name || null,
+          ex_date: d.exDate,
+          pay_date: d.payDate,
+          amount: d.amount,
+          yield_pct: yld,
+          freq: d.freq,
+        });
+      }
+    } catch (e) {
+      console.error(`[US] ${w.symbol} 배당 실패: ${e.message}`);
+    }
+    await sleep(300);
+  }
+  if (!rows.length) return 0;
+  const { error } = await supabase
+    .from("dividends")
+    .upsert(rows, { onConflict: "market,symbol,ex_date", ignoreDuplicates: false });
+  if (error) throw error;
+  return rows.length;
+}
+
+// 해외 실적 일정 수집 → earnings 표 (무료 한도면 0건)
+async function collectUsEarnings(symbols) {
+  if (!symbols.length) return 0;
+  const from = ymd(new Date(Date.now() - 7 * 86400000));
+  const to = ymd(new Date(Date.now() + 90 * 86400000));
+  const rows = [];
+  for (const w of symbols) {
+    try {
+      const list = await getEarningsCalendar({ symbol: w.symbol, from, to });
+      for (const e of list) {
+        if (!e.date) continue;
+        rows.push({
+          market: "US",
+          symbol: w.symbol,
+          name: w.name || null,
+          report_date: e.date,
+          period: e.period,
+          eps_estimate: e.epsEstimate,
+          hour: e.hour,
+        });
+      }
+    } catch (e) {
+      console.error(`[US] ${w.symbol} 실적 실패: ${e.message}`);
+    }
+    await sleep(300);
+  }
+  if (!rows.length) return 0;
+  const { error } = await supabase
+    .from("earnings")
+    .upsert(rows, { onConflict: "market,symbol,report_date", ignoreDuplicates: false });
+  if (error) throw error;
+  return rows.length;
+}
+
 async function main() {
   console.log("수집 시작:", new Date().toISOString());
 
@@ -142,6 +261,17 @@ async function main() {
   await refreshUsIpoCalendar();
   await collectKrIpo();
   console.log("IPO 캘린더 갱신 완료");
+
+  // 해외 관심종목: 뉴스/배당/실적 수집 (무료 한도에서 막히면 0건)
+  try {
+    const usSyms = await usWatchSymbols();
+    const newsN = await collectUsNews(usSyms);
+    const divN = await collectUsDividends(usSyms);
+    const earnN = await collectUsEarnings(usSyms);
+    console.log(`해외 뉴스 ${newsN}건 / 배당 ${divN}건 / 실적 ${earnN}건`);
+  } catch (e) {
+    console.error("해외 부가정보 수집 일부 실패:", e.message);
+  }
 
   if (pushConfigured) {
     await notifyDisclosures(newDisclosures);
