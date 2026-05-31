@@ -1,0 +1,6 @@
+node_modules/
+.env
+*.zip
+*.tar.gz
+build/
+.dart_tool/

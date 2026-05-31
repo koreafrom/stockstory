@@ -1,0 +1,23 @@
+name: seed-stocks
+
+on:
+  schedule:
+    # 매월 1일 (종목 마스터는 자주 안 바뀌므로 월 1회면 충분)
+    - cron: "0 0 1 * *"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install
+      - run: node src/seed_stocks.js
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
